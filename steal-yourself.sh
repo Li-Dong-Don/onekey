@@ -31,8 +31,8 @@ usage() {
 
   --domain DOMAIN       Reality SNI 主域名（Cloudflare 灰云/仅 DNS）
   --decoy DOMAIN        伪装站域名（例如 Cloudflare Worker 橙云域名）
-  --email EMAIL         Caddy 申请证书使用的邮箱
-  --yes                 非交互安装（必须同时提供以上三个参数）
+  --email EMAIL         Caddy 申请证书使用的邮箱（默认 admin@主域名）
+  --yes                 非交互安装（必须提供主域名和伪装域名）
   --force               允许接管已被占用的 80/443 端口对应服务
   --help                 显示帮助
 
@@ -83,13 +83,13 @@ prompt_value() {
 
 prompt_value DOMAIN "Reality 主域名（灰云/仅 DNS）" "$DOMAIN"
 prompt_value DECOY_DOMAIN "伪装站域名（橙云 Worker 或其他 HTTPS 站点）" "$DECOY_DOMAIN"
-prompt_value ACME_EMAIL "ACME 证书邮箱" "$ACME_EMAIL"
 DOMAIN=$(printf '%s' "$DOMAIN" | tr '[:upper:]' '[:lower:]')
 DECOY_DOMAIN=$(printf '%s' "$DECOY_DOMAIN" | tr '[:upper:]' '[:lower:]')
 validate_domain "$DOMAIN"
 validate_domain "$DECOY_DOMAIN"
-validate_email "$ACME_EMAIL"
 [ "$DOMAIN" != "$DECOY_DOMAIN" ] || die "主域名和伪装站域名不能相同"
+ACME_EMAIL=${ACME_EMAIL:-admin@$DOMAIN}
+validate_email "$ACME_EMAIL"
 
 OS_ID='' OS_VERSION='' PKG='' INIT=''
 [ -r /etc/os-release ] || die "无法识别操作系统"
@@ -178,7 +178,7 @@ install_packages() {
   if [ "$PKG" = apt ]; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y curl ca-certificates unzip openssl jq lsof gnupg debian-keyring debian-archive-keyring apt-transport-https
+    apt-get install -y bash curl ca-certificates unzip openssl jq lsof gnupg debian-keyring debian-archive-keyring apt-transport-https
   else
     apk add --no-cache curl ca-certificates unzip openssl jq lsof libcap
   fi
@@ -198,7 +198,7 @@ install_xray() {
   info "安装 Xray-core"
   if [ "$INIT" = systemd ]; then
     curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh -o /tmp/xray-install.sh
-    sh /tmp/xray-install.sh install -u root
+    bash /tmp/xray-install.sh install -u root
     rm -f /tmp/xray-install.sh
   else
     arch=$(arch_name)
