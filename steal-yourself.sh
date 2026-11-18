@@ -212,17 +212,17 @@ xray_arch() {  # 返回 Xray-core release 资源名后缀
 
 install_xray() {
   info "安装 Xray-core"
-  proxy_opt=()
-  [ -n "${XRAY_PROXY:-}" ] && proxy_opt=(-p "$XRAY_PROXY")
 
   if [ "$INIT" = systemd ]; then
     tmp=$(mktemp)
     curl -fsSL --retry 3 --max-time 90 \
       https://github.com/XTLS/Xray-install/raw/main/install-release.sh -o "$tmp" \
       || { rm -f "$tmp"; die "下载 install-release.sh 失败"; }
-    # 新版只认动作词与下列选项，绝对不能再带 -u/--user
-    bash "$tmp" install ${XRAY_VERSION:+--version "$XRAY_VERSION"} "${proxy_opt[@]}" \
-      || { rm -f "$tmp"; die "Xray 安装失败"; }
+    # POSIX：不用 bash 数组，改用位置参数，dash/ash 均可解析
+    set -- install
+    if [ -n "${XRAY_VERSION:-}" ]; then set -- "$@" --version "$XRAY_VERSION"; fi
+    if [ -n "${XRAY_PROXY:-}" ];   then set -- "$@" -p "$XRAY_PROXY"; fi
+    bash "$tmp" "$@" || { rm -f "$tmp"; die "Xray 安装失败"; }
     rm -f "$tmp"
 
     if [ "${XRAY_RUN_AS_ROOT:-0}" = 1 ]; then
@@ -238,7 +238,12 @@ install_xray() {
     a=$(xray_arch) || die "不支持的架构：$(uname -m)"
     # 走 --local 离线安装可复用官方校验逻辑；此处手工兜底
     api=https://api.github.com/repos/XTLS/Xray-core/releases/latest
-    url=$(curl -fsSL --retry 3 "${proxy_opt[@]/#-p/--proxy}" "$api" 2>/dev/null \
+    if [ -n "${XRAY_PROXY:-}" ]; then
+      set -- --proxy "$XRAY_PROXY"
+    else
+      set --
+    fi
+    url=$(curl -fsSL --retry 3 "$@" "$api" 2>/dev/null \
       | jq -r --arg s "linux-$a.zip" '.assets[]|select(.name|ascii_downcase|endswith($s))|.browser_download_url' \
       | head -n1)
     [ -n "$url" ] && [ "$url" != null ] || die "无法获取 Xray 下载地址（arch=$a）"
@@ -411,7 +416,13 @@ EOF
   }
 }
 EOF
-  chmod 600 /usr/local/etc/xray/config.json
+  # install-release.sh 现在用专用 xray 用户运行服务，配置必须让该组可读
+  if id -u xray >/dev/null 2>&1; then
+    chown root:xray /usr/local/etc/xray/config.json
+    chmod 640 /usr/local/etc/xray/config.json
+  else
+    chmod 600 /usr/local/etc/xray/config.json
+  fi
   if getent group caddy >/dev/null 2>&1; then
     chown root:caddy /etc/caddy/caddy.json
     chmod 640 /etc/caddy/caddy.json
