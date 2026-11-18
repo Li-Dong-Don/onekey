@@ -194,25 +194,73 @@ arch_name() {
   esac
 }
 
+xray_arch() {  # 返回 Xray-core release 资源名后缀
+  case "$(uname -m)" in
+    x86_64|amd64)    echo 64 ;;
+    i386|i486|i586|i686) echo 32 ;;
+    aarch64|arm64)   echo arm64-v8a ;;
+    armv7l|armv7*)   echo arm32-v7a ;;
+    mips64)          echo mips64 ;;
+    mips64le)        echo mips64le ;;
+    ppc64)           echo ppc64 ;;
+    ppc64le)         echo ppc64le ;;
+    riscv64)         echo riscv64 ;;
+    s390x)           echo s390x ;;
+    *) return 1 ;;
+  esac
+}
+
 install_xray() {
   info "安装 Xray-core"
+  proxy_opt=()
+  [ -n "${XRAY_PROXY:-}" ] && proxy_opt=(-p "$XRAY_PROXY")
+
   if [ "$INIT" = systemd ]; then
-    curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh -o /tmp/xray-install.sh
-    bash /tmp/xray-install.sh install -u root
-    rm -f /tmp/xray-install.sh
+    tmp=$(mktemp)
+    curl -fsSL --retry 3 --max-time 90 \
+      https://github.com/XTLS/Xray-install/raw/main/install-release.sh -o "$tmp" \
+      || { rm -f "$tmp"; die "下载 install-release.sh 失败"; }
+    # 新版只认动作词与下列选项，绝对不能再带 -u/--user
+    bash "$tmp" install ${XRAY_VERSION:+--version "$XRAY_VERSION"} "${proxy_opt[@]}" \
+      || { rm -f "$tmp"; die "Xray 安装失败"; }
+    rm -f "$tmp"
+
+    if [ "${XRAY_RUN_AS_ROOT:-0}" = 1 ]; then
+      mkdir -p /etc/systemd/system/xray.service.d /etc/systemd/system/xray@.service.d
+      printf '[Service]\nUser=root\nGroup=root\n' \
+        | tee /etc/systemd/system/xray.service.d/zz-root.conf \
+        | tee /etc/systemd/system/xray@.service.d/zz-root.conf >/dev/null
+      systemctl daemon-reload
+      systemctl restart xray 2>/dev/null || true
+    fi
   else
-    arch=$(arch_name)
-    release=$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest)
-    url=$(printf '%s' "$release" | jq -r --arg suffix "linux-$arch.zip" '.assets[] | select(.name | ascii_downcase | endswith($suffix)) | .browser_download_url' | head -n1)
-    [ -n "$url" ] && [ "$url" != null ] || die "无法获取 Xray 下载地址"
-    rm -rf /tmp/xray-install && mkdir -p /tmp/xray-install
-    curl -fL "$url" -o /tmp/xray-install/xray.zip
-    unzip -oq /tmp/xray-install/xray.zip -d /tmp/xray-install
-    install -m 0755 /tmp/xray-install/xray /usr/local/bin/xray
-    mkdir -p /usr/local/share/xray /usr/local/etc/xray /var/log/xray
-    [ ! -f /tmp/xray-install/geoip.dat ] || install -m 0644 /tmp/xray-install/geoip.dat /usr/local/share/xray/geoip.dat
-    [ ! -f /tmp/xray-install/geosite.dat ] || install -m 0644 /tmp/xray-install/geosite.dat /usr/local/share/xray/geosite.dat
-    rm -rf /tmp/xray-install
+    # 非 systemd（Alpine/OpenRC 等）：官方脚本硬性要求 systemd，只能自取 zip
+    a=$(xray_arch) || die "不支持的架构：$(uname -m)"
+    # 走 --local 离线安装可复用官方校验逻辑；此处手工兜底
+    api=https://api.github.com/repos/XTLS/Xray-core/releases/latest
+    url=$(curl -fsSL --retry 3 "${proxy_opt[@]/#-p/--proxy}" "$api" 2>/dev/null \
+      | jq -r --arg s "linux-$a.zip" '.assets[]|select(.name|ascii_downcase|endswith($s))|.browser_download_url' \
+      | head -n1)
+    [ -n "$url" ] && [ "$url" != null ] || die "无法获取 Xray 下载地址（arch=$a）"
+    d=$(mktemp -d)
+    curl -fL --retry 3 "$url" -o "$d/xray.zip" || { rm -rf "$d"; die "下载 Xray 失败"; }
+    unzip -oq "$d/xray.zip" -d "$d" || { rm -rf "$d"; die "解压失败"; }
+    install -Dm0755 "$d/xray" /usr/local/bin/xray
+    install -d -m0755 /usr/local/share/xray /usr/local/etc/xray /var/log/xray
+    [ ! -f "$d/geoip.dat" ]   || install -m0644 "$d/geoip.dat"   /usr/local/share/xray/geoip.dat
+    [ ! -f "$d/geosite.dat" ] || install -m0644 "$d/geosite.dat" /usr/local/share/xray/geosite.dat
+    rm -rf "$d"
+    # 还须自行提供 OpenRC unit，否则只有二进制
+    cat >/etc/init.d/xray <<'EOF'
+#!/sbin/openrc-run
+command=/usr/local/bin/xray
+command_args="run -config /usr/local/etc/xray/config.json"
+command_background=true
+pidfile=/run/xray.pid
+depend() { need net; }
+EOF
+    chmod 0755 /etc/init.d/xray
+    rc-update add xray default && rc-service xray start
   fi
 }
 
